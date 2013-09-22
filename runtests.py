@@ -29,6 +29,7 @@ def configure_settings(options):
                 'django.contrib.contenttypes',
                 'test.generic',
                 'test.ambiguous',
+                'test.ambiguous_2',
             ),
             SITE_ID=1,
             TEST_ROOT=join(dirname(__file__), 'test', 'generic', 'tests'),
