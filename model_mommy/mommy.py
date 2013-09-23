@@ -146,10 +146,6 @@ default_mapping = {
 }
 
 
-
-
-
-
 class ModelFinder(object):
     '''
     Encapsulates all the logic for finding a model to Mommy.
@@ -255,7 +251,7 @@ class ModelInstanceLimit(object):
         This stops Database IntergrityError's on
         ManyToMany fields 
         """
-        model = self.__normalize_model(model)
+        model = self._normalize_model(model)
 
         counter = self._model_counter.get(model, 0)
         instance = self.instance_cache[self.normalize_model(model)][counter]
