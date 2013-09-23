@@ -254,7 +254,7 @@ class ModelInstanceLimit(object):
         model = self._normalize_model(model)
 
         counter = self._model_counter.get(model, 0)
-        instance = self.instance_cache[self.normalize_model(model)][counter]
+        instance = self.instance_cache[model][counter]
         counter += 1 
         counter = counter % self._registered_model_instance_limit[model]
         self._model_counter[model] = counter
