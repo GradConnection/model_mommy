@@ -26,6 +26,8 @@ from exceptions import ModelNotFound, AmbiguousModelName, InvalidQuantityExcepti
 
 from six import string_types
 
+import random
+
 
 class Sequence(object):
 
@@ -59,13 +61,13 @@ foreign_key_required = [lambda field: ('model', field.related.parent_model)]
 
 MAX_MANY_QUANTITY = 5
 
-def make(model, _quantity=None, make_m2m=False, **attrs):
+def make(model, _quantity=None, make_m2m=False, fill_nullable_fields=False, **attrs):
     """
     Creates a persisted instance from a given model its associated models.
     It fill the fields with random values or you can specify
     which fields you want to define its values by yourself.
     """
-    mommy = Mommy(model, make_m2m=make_m2m)
+    mommy = Mommy(model, make_m2m=make_m2m, fill_nullable_fields=fill_nullable_fields)
     if _quantity and (not isinstance(_quantity, int) or _quantity < 1):
         raise InvalidQuantityException
 
@@ -105,7 +107,7 @@ def prepare_recipe(mommy_recipe_name, _quantity=None, **new_attrs):
 
 
 def __m2m_generator(model, **attrs):
-    return make(model, _quantity=MAX_MANY_QUANTITY, **attrs)
+    return make(model, _quantity=model_instance_limit.get_model_limit(model) or MAX_MANY_QUANTITY, **attrs)
 
 make.required = foreign_key_required
 prepare.required = foreign_key_required
@@ -142,6 +144,10 @@ default_mapping = {
 
     ContentType: generators.gen_content_type,
 }
+
+
+
+
 
 
 class ModelFinder(object):
@@ -199,14 +205,96 @@ class ModelFinder(object):
                 if name not in unique_models:
                     unique_models[name] = model
                 else:
-                    if name not in ambiguous_models:
-                        ambiguous_models.append(name)
+                    ambiguous_models.append(name)
 
         for name in ambiguous_models:
             unique_models.pop(name)
 
         self._ambiguous_models = ambiguous_models
         self._unique_models = unique_models
+
+
+class ModelInstanceLimit(object):
+
+    _registered_model_instance_limit = {}
+    finder = ModelFinder()
+    instance_cache = {}
+    _model_counter = {}
+
+    def register(self, model, max_per_class):
+        """ Register a `model` and a limit on instances for that class.
+        """
+        model = self._normalize_model(model)
+        self._registered_model_instance_limit[model] = max_per_class
+
+    def get_model_limit(self, model):
+        """ Get the registered limit for the `model`.
+        """
+        model = self._normalize_model(model)
+        return self._registered_model_instance_limit.get(model)
+
+    def reset(self):
+        """Reset the instance cache and counter. Useful when testing
+        """
+        self.instance_cache = {}
+        self._model_counter = {}
+
+    def _normalize_model(self, model):
+        """ Normalize the `model` 
+        """
+
+        if isinstance(model, ModelBase):
+            model = model
+        else:
+            model = self.finder.get_model(model)
+        return model
+
+    def get_next_for_model(self, model):
+        """ Get the next instance for the `model`.
+        This stops Database IntergrityError's on
+        ManyToMany fields 
+        """
+        model = self.__normalize_model(model)
+
+        counter = self._model_counter.get(model, 0)
+        instance = self.instance_cache[self.normalize_model(model)][counter]
+        counter += 1 
+        counter = counter % self._registered_model_instance_limit[model]
+        self._model_counter[model] = counter
+
+        return instance
+
+    @classmethod
+    def cache_instances(cls, func):
+        """ Decorator to cache instances and limit
+        the number of instances per model
+        """
+
+        def wrapped(self, *args, **kwargs): 
+
+            model_class = self.model
+            model_max_instances = model_instance_limit.get_model_limit(model_class)
+
+            if not model_max_instances:
+                return func(self, *args, **kwargs)
+
+            def _get_instance():
+                return func(self, *args, **kwargs)
+
+            # Cache the instances
+            try:
+                if len(model_instance_limit.instance_cache[model_class]) < model_max_instances:
+                    model_instance_limit.instance_cache[model_class].append(_get_instance())
+
+            except KeyError:
+                model_instance_limit.instance_cache[model_class] = [_get_instance()]
+
+            returning = model_instance_limit.get_next_for_model(model_class)
+            return returning
+
+        return wrapped
+
+model_instance_limit = ModelInstanceLimit()
 
 
 class Mommy(object):
@@ -217,9 +305,11 @@ class Mommy(object):
     # rebuilding the model cache for every make_* or prepare_* call.
     finder = ModelFinder()
 
-    def __init__(self, model, make_m2m=False):
+    def __init__(self, model, make_m2m=False, fill_nullable_fields=None):
         self.make_m2m = make_m2m
         self.m2m_dict = {}
+
+        self.fill_nullable_fields = fill_nullable_fields
 
         if isinstance(model, ModelBase):
             self.model = model
@@ -236,6 +326,7 @@ class Mommy(object):
             field_class = getattr(importlib.import_module(path), field_name)
             self.type_mapping[field_class] = v
 
+    @model_instance_limit.cache_instances
     def make(self, **attrs):
         '''Creates and persists an instance of the model
         associated with Mommy instance.'''
@@ -263,7 +354,9 @@ class Mommy(object):
                 continue
 
             if all([field.name not in model_attrs, field.name not in self.rel_fields, field.name not in self.attr_mapping]):
-                if not issubclass(field.__class__, Field) or field.has_default() or field.blank:
+                if not issubclass(field.__class__, Field) or field.has_default() or \
+                                                            (not self.fill_nullable_fields and field.blank):
+
                     continue
 
             if isinstance(field, ManyToManyField):
@@ -272,7 +365,7 @@ class Mommy(object):
                 else:
                     self.m2m_dict[field.name] = model_attrs.pop(field.name)
             elif field_value_not_defined:
-                if field.name not in self.rel_fields and field.null:
+                if field.name not in self.rel_fields and (not self.fill_nullable_fields and field.null):
                     continue
                 else:
                     model_attrs[field.name] = self.generate_value(field)
@@ -289,6 +382,7 @@ class Mommy(object):
 
     def instance(self, attrs, _commit):
         instance = self.model(**attrs)
+        # print 'Creating: %s' % self.model
         # m2m only works for persisted instances
         if _commit:
             instance.save()
