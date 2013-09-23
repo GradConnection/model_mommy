@@ -205,7 +205,8 @@ class ModelFinder(object):
                 if name not in unique_models:
                     unique_models[name] = model
                 else:
-                    ambiguous_models.append(name)
+                    if name not in ambiguous_models:
+                        ambiguous_models.append(name)
 
         for name in ambiguous_models:
             unique_models.pop(name)
